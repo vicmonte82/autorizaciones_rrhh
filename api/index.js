@@ -925,6 +925,186 @@ app.get('/datosSalidas', async (req, res) => {
     }
 });
 
+app.post("/autorizaciones", async (req, res) => {
+    const { legajo_empleado, tipo, motivo, creador } = req.body;
+
+    // 1) Validar empleado
+    try {
+        const emp = await pool.query(
+            "SELECT estado FROM usuarios WHERE legajo = $1",
+            [legajo_empleado]
+        );
+        if (!emp.rows.length) {
+            return res.status(404).json({ error: "Colaborador no encontrado" });
+        }
+        const estEmp = emp.rows[0].estado.trim().toUpperCase();
+        if (estEmp === "INAC") {
+            return res
+                .status(400)
+                .json({ error: "El colaborador no pertenece a planta" });
+        }
+    } catch (err) {
+        console.error("Error validando empleado:", err);
+        return res.status(500).json({ error: err.message });
+    }
+
+    // 2) Validar supervisor
+    try {
+        const sup = await pool.query(
+            "SELECT estado FROM usuarios_login WHERE legajo = $1",
+            [creador]
+        );
+        if (!sup.rows.length) {
+            return res.status(400).json({ error: "Supervisor no encontrado" });
+        }
+        const estSup = sup.rows[0].estado.trim().toUpperCase();
+        if (estSup === "INAC") {
+            return res
+                .status(400)
+                .json({ error: "El supervisor no pertenece a planta" });
+        }
+    } catch (err) {
+        console.error("Error validando supervisor:", err);
+        return res.status(500).json({ error: err.message });
+    }
+
+    // 3) Bloquear auto‑autorización: colaborador y supervisor no pueden ser el mismo
+    if (legajo_empleado.trim() === creador.trim()) {
+        return res
+            .status(400)
+            .json({ error: "El supervisor no puede autorizarse a sí mismo" });
+    }
+
+    // 4) Verificar que no haya ya una autorización PENDIENTE para este colaborador
+    try {
+        // Query más robusta: trim + uppercase
+        const pend = await pool.query(
+            `SELECT *
+            FROM autorizaciones
+            WHERE legajo_empleado = $1
+            AND UPPER(TRIM(estado)) = 'PENDIENTE'`,
+            [legajo_empleado]
+        );
+        console.log("Pendientes encontradas:", pend.rows); // <-- para debugging
+
+        if (pend.rows.length > 0) {
+            return res
+                .status(400)
+                .json({ error: "El colaborador tiene una autorización pendiente" });
+        }
+    } catch (err) {
+        console.error("Error validando autorizaciones pendientes:", err);
+        return res.status(500).json({ error: err.message });
+    }
+
+    // 5) Insertar nueva autorización
+    try {
+        const { rows } = await pool.query(
+            `INSERT INTO autorizaciones
+            (legajo_empleado, legajo_supervisor, tipo, motivo)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (legajo_empleado)
+            WHERE ((estado)::text = 'PENDIENTE'::text)
+             DO NOTHING
+        RETURNING *;`,
+            [legajo_empleado, creador, tipo, motivo]
+        );
+
+        if (rows.length === 0) {
+            // Ya existía una PENDIENTE, no se insertó nada
+            return res
+                .status(400)
+                .json({ error: "El colaborador tiene una autorización pendiente" });
+        }
+
+        // Se insertó OK
+        const nueva = rows[0];
+        io.emit("nuevaAutorizacion", nueva);
+        return res.status(201).json(nueva);
+
+    } catch (err) {
+        console.error("Error inesperado al crear autorización:", err);
+        return res
+            .status(500)
+            .json({ error: "Ocurrió un error inesperado al crear la autorización" });
+    }
+
+});
+
+app.get("/autorizaciones", async (req, res) => {
+    const { tipo, estado } = req.query;
+    const condiciones = [];
+    const params = [];
+    let idx = 1;
+
+    if (tipo) {
+        condiciones.push(`a.tipo = $${idx++}`);
+        params.push(tipo);
+    }
+    if (estado) {
+        condiciones.push(`a.estado = $${idx++}`);
+        params.push(estado);
+    }
+
+    const whereClause = condiciones.length
+        ? "WHERE " + condiciones.join(" AND ")
+        : "";
+
+    const query = `
+    SELECT
+      a.*,
+      TRIM(uE.nombre) || ' ' || TRIM(uE.apellido) AS empleado_nombre,
+      TRIM(uS.nombre) || ' ' || TRIM(uS.apellido) AS supervisor_nombre,
+      -- si es SALIDA tomamos de motivos_salida, si es INGRESO de motivos_ingreso
+      CASE
+        WHEN a.tipo = 'SALIDA' THEN ms.motivo_salida
+        ELSE mi.motivo_salida
+      END AS motivo_desc
+    FROM autorizaciones a
+      JOIN usuarios       uE ON a.legajo_empleado   = uE.legajo
+      JOIN usuarios       uS ON a.legajo_supervisor = uS.legajo
+      LEFT JOIN motivos_salida  ms ON a.tipo = 'SALIDA' AND a.motivo = ms.id
+      LEFT JOIN motivos_ingreso mi ON a.tipo = 'INGRESO' AND a.motivo = mi.id
+    ${whereClause}
+    ORDER BY a.solicitado_en DESC`;
+
+    try {
+        const { rows } = await pool.query(query, params);
+        res.json(rows);
+    } catch (err) {
+        console.error("Error listando autorizaciones:", err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.put("/autorizaciones/:id", async (req, res) => {
+    const { id } = req.params;
+    const { estado, respondido_por } = req.body;
+    const respondido_en = new Date();
+
+    try {
+        const { rows } = await pool.query(
+            `UPDATE autorizaciones
+         SET estado        = $1,
+             respondido_por = $2,
+             respondido_en  = $3
+       WHERE id = $4
+       RETURNING *`,
+            [estado, respondido_por, respondido_en, id]
+        );
+        if (rows.length === 0) {
+            return res.status(404).json({ error: "Autorización no encontrada" });
+        }
+        const actualizada = rows[0];
+        io.emit("autorizacionActualizada", actualizada);
+        res.json(actualizada);
+    } catch (err) {
+        console.error("Error actualizando autorización:", err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+
 
 const port = process.env.PORT || 4060;
 
@@ -941,3 +1121,4 @@ cron.schedule('0 0 * * *', async () => {
         console.error('Error al ejecutar cron job:', error);
     }
 });
+
