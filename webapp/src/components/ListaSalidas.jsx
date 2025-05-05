@@ -61,7 +61,6 @@ const ListaSalidas = ({ rol, legajo }) => {
         return () => socket.off('actualizarSalida');
     }, [userRol, userLegajo]);
 
-
     useEffect(() => {
         const getSalidas = async () => {
             try {
@@ -118,7 +117,6 @@ const ListaSalidas = ({ rol, legajo }) => {
             console.error('Error al marcar el regreso:', error);
         }
     };
-
 
     return (
         <Box sx={{ marginTop: 4 }}>

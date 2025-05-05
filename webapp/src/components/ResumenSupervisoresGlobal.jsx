@@ -24,6 +24,9 @@ import Estadisticas from './Estadisticas';
 
 import { decimalHoursToDDHHMMSSMS } from './timeUtils';
 
+import config from "./config";
+
+
 
 function Row({ supervisor }) {
     const [open, setOpen] = useState(false);
@@ -96,7 +99,7 @@ function ResumenSupervisoresGlobal({ anio, mes }) {
             try {
                 // Ajusta la URL al endpoint
                 const response = await axios.get(
-                    `http://10.1.2.237:4060/datosSalidas?mes=${mes}&anio=${anio}`
+                    `${config.apiBaseUrl}/datosSalidas?mes=${mes}&anio=${anio}`
                 );
                 setDatosSupervisores(response.data);
             } catch (error) {

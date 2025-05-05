@@ -35,7 +35,6 @@ export function decimalHoursToDDHHMMSSMS(hoursDecimal) {
     return `${dd} días, ${hh} horas, ${mm} minutos, :${ss} segundos, ${ms} milisegundos`;
 }
 
-
 export function decimalHoursToHMS(decimalHrs) {
     // 1) Convertir horas decimales a TOTAL de segundos
     const totalSeconds = Math.floor(Math.abs(decimalHrs) * 3600);
@@ -48,5 +47,17 @@ export function decimalHoursToHMS(decimalHrs) {
 
     // 3) Retornar en formato "Hh Mm Ss"
     return `${hours}h ${minutes}m ${seconds}s`;
+}
+
+export function formatDate(isoString) {
+    if (!isoString) return "-";
+    const d = new Date(isoString);
+    const dd = String(d.getDate()).padStart(2, "0");
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const yy = String(d.getFullYear()).slice(-2);
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mi = String(d.getMinutes()).padStart(2, "0");
+    const ss = String(d.getSeconds()).padStart(2, "0");
+    return `${dd}-${mm}-${yy} ${hh}:${mi}:${ss}`;
 }
 

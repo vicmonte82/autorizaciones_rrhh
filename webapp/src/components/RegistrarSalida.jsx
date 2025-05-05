@@ -10,6 +10,7 @@ import {
     Select,
     MenuItem,
     Button,
+    ButtonGroup,
     TextField,
     Typography,
     List,
@@ -19,11 +20,20 @@ import {
     FormControlLabel
 } from "@mui/material";
 import axios from "axios";
-import config from './config';
+import config from "./config";
 
-const FormularioSalida = ({ supervisor }) => {
+
+const RegistrarSalida = ({
+    supervisor,
+    onSalidaCreated = () => { },   // callback para nuevas salidas
+    onIngresoCreated = () => { }   // callback para nuevas autorizaciones
+}) => {
+    // 1) Estados
+    const [mode, setMode] = useState("salida");           // 'salida' o 'ingreso'
     const [usuarios, setUsuarios] = useState([]);
-    const [motivos, setMotivos] = useState([]);
+    const [motivosSalida, setMotivosSalida] = useState([]);
+    const [motivosIngreso, setMotivosIngreso] = useState([]);
+
     const [usuarioSeleccionado, setUsuarioSeleccionado] = useState(null);
     const [salidaSeleccionada, setSalidaSeleccionada] = useState({
         legajo: "",
@@ -31,150 +41,197 @@ const FormularioSalida = ({ supervisor }) => {
         creador: supervisor,
         observaciones: ""
     });
+
     const [inputLegajo, setInputLegajo] = useState("");
     const [isDialogOpen, setIsDialogOpen] = useState(false);
     const [searchInput, setSearchInput] = useState("");
     const [filteredUsuarios, setFilteredUsuarios] = useState([]);
     const [sinRetorno, setSinRetorno] = useState(false);
 
+    // 2) Cargar usuarios y motivos de salida
     useEffect(() => {
-        const fetchUsuariosYMotivos = async () => {
+        const fetchInitialData = async () => {
             try {
-                const resUsuarios = await axios.get(
-                    `${config.apiBaseUrl}/usuarios/empleado`
-                );
-                const resMotivos = await axios.get(`${config.apiBaseUrl}/motivos`);
-                setUsuarios(resUsuarios.data);
-                setMotivos(resMotivos.data);
-            } catch (error) {
-                console.error("Error al obtener datos:", error);
+                const [resU, resMS, resMI] = await Promise.all([
+                    axios.get(`${config.apiBaseUrl}/usuarios/empleado`),
+                    axios.get(`${config.apiBaseUrl}/motivos`),
+                    axios.get(`${config.apiBaseUrl}/autorizaciones/motivos`)
+                ]);
+                setUsuarios(resU.data);
+                setMotivosSalida(resMS.data);
+                setMotivosIngreso(resMI.data);
+            } catch (err) {
+                console.error("Error al cargar datos iniciales:", err);
             }
         };
 
-        fetchUsuariosYMotivos();
+        fetchInitialData();
     }, []);
 
-    const handleChange = (event) => {
-        const { name, value } = event.target;
-        setSalidaSeleccionada((prevState) => ({
-            ...prevState,
-            [name]: value,
-        }));
-    };
 
-    const handleSearchChange = (event) => {
-        const inputValue = event.target.value.toLowerCase();
-        setSearchInput(inputValue);
-
-        const resultados = usuarios.filter(
-            (u) =>
-                u.nombre.toLowerCase().includes(inputValue) ||
-                u.apellido.toLowerCase().includes(inputValue) ||
-                u.legajo.toLowerCase().includes(inputValue)
+    // 3) Handlers de búsqueda de usuario
+    const handleSearchChange = e => {
+        const q = e.target.value.toLowerCase();
+        setSearchInput(q);
+        setFilteredUsuarios(
+            usuarios.filter(u =>
+                u.nombre.toLowerCase().includes(q) ||
+                u.apellido.toLowerCase().includes(q) ||
+                u.legajo.toLowerCase().includes(q)
+            )
         );
-        setFilteredUsuarios(resultados);
     };
 
-    const handleLegajoChange = (event) => {
-        const legajo = event.target.value;
-        setInputLegajo(legajo);
-
-        const usuarioEncontrado = usuarios.find((u) => u.legajo === legajo);
-        setUsuarioSeleccionado(usuarioEncontrado || null);
-
-        setSalidaSeleccionada((prev) => ({
-            ...prev,
-            legajo: usuarioEncontrado ? usuarioEncontrado.legajo : "",
-        }));
-    };
-
-    const handleKeyDown = (event) => {
-        if (event.key === "Enter") {
-            event.preventDefault();
-        }
-    };
-
-    const handleSelectUsuario = (usuario) => {
-        setUsuarioSeleccionado(usuario);
+    const handleLegajoChange = e => {
+        const leg = e.target.value;
+        setInputLegajo(leg);
+        const user = usuarios.find(u => u.legajo === leg) || null;
+        setUsuarioSeleccionado(user);
         setSalidaSeleccionada(prev => ({
             ...prev,
-            legajo: usuario.legajo,
+            legajo: user ? user.legajo : ""
         }));
+    };
+
+    const handleKeyDown = e => {
+        if (e.key === "Enter") e.preventDefault();
+    };
+
+    const handleSelectUsuario = user => {
+        setUsuarioSeleccionado(user);
+        setSalidaSeleccionada(prev => ({ ...prev, legajo: user.legajo }));
         setIsDialogOpen(false);
     };
 
-
-    const handleSinRetornoChange = (event) => {
-        setSinRetorno(event.target.checked);
+    // 4) Otros handlers de formulario
+    const handleChange = e => {
+        const { name, value } = e.target;
+        setSalidaSeleccionada(prev => ({ ...prev, [name]: value }));
     };
 
-    useEffect(() => {
-        console.log(sinRetorno);
-    }, [sinRetorno]);
+    const handleSinRetornoChange = e => {
+        setSinRetorno(e.target.checked);
+    };
 
-    const handleSubmit = async (event) => {
-        event.preventDefault();
+    // 5) Envío del formulario
+    const handleSubmit = async (e) => {
+        e.preventDefault();
 
         if (!usuarioSeleccionado) {
-            alert("Por favor, selecciona un usuario.");
-            return;
-        }
-
-        const nuevaSalida = { ...salidaSeleccionada };
-        if (sinRetorno) {
-            nuevaSalida.observaciones = "sin retorno";
+            return alert("Por favor, selecciona un usuario.");
         }
 
         try {
-            const response = await axios.post(`${config.apiBaseUrl}/salidas`, nuevaSalida);
-            console.log("Salida creada:", response.data);
-        } catch (error) {
-            console.error("Error al crear salida:", error);
-            alert("El usuario tiene una salida activa.");
+            if (mode === "salida") {
+                // --- Payload para POST /salidas ---
+                const payloadSalida = {
+                    legajo: salidaSeleccionada.legajo,                            // req.body.legajo
+                    motivo: salidaSeleccionada.motivo,                           // req.body.motivo
+                    creador: supervisor,                                         // req.body.creador
+                    observaciones: sinRetorno ? "sin retorno" : salidaSeleccionada.observaciones || ""
+                };
+
+                const { data: nuevaSalida } = await axios.post(
+                    `${config.apiBaseUrl}/salidas`,
+                    payloadSalida
+                );
+                // Llamo al callback de salidas
+                onSalidaCreated?.(nuevaSalida);
+
+            } else {
+                // --- Payload para POST /autorizaciones (ingreso) ---
+                const payloadIngreso = {
+                    legajo_empleado: salidaSeleccionada.legajo,  // req.body.legajo_empleado
+                    tipo: "INGRESO",                             // req.body.tipo
+                    motivo: salidaSeleccionada.motivo,           // req.body.motivo
+                    creador: supervisor                          // req.body.creador
+                };
+
+                const { data: nuevaAutorizacion } = await axios.post(
+                    `${config.apiBaseUrl}/autorizaciones`,
+                    payloadIngreso
+                );
+                // Llamo al callback de autorizaciones
+                onIngresoCreated?.(nuevaAutorizacion);
+            }
+
+            // --- Después de crear, limpio el formulario ---
+            setUsuarioSeleccionado(null);
+            setInputLegajo("");
+            setSalidaSeleccionada({
+                legajo: "",
+                motivo: "",
+                creador: supervisor,
+                observaciones: ""
+            });
+            setSinRetorno(false);
+
+        } catch (err) {
+            console.error("Error al crear:", err);
+            if (mode === "salida") {
+                alert(err.response?.data?.error || "No se pudo crear la salida.");
+            } else {
+                alert(err.response?.data?.error || "No se pudo crear la autorización de ingreso.");
+            }
         }
     };
 
     return (
         <form onSubmit={handleSubmit}>
-            <Box display="flex" alignItems="center" gap={2} marginBottom={2}>
+            {/* Toggle Salida / Ingreso */}
+            <ButtonGroup sx={{ mb: 2 }}>
+                <Button
+                    variant={mode === "salida" ? "contained" : "outlined"}
+                    onClick={() => setMode("salida")}
+                >
+                    Salida
+                </Button>
+                <Button
+                    variant={mode === "ingreso" ? "contained" : "outlined"}
+                    onClick={() => setMode("ingreso")}
+                >
+                    Ingreso
+                </Button>
+            </ButtonGroup>
+
+            {/* Búsqueda de usuario */}
+            <Box display="flex" alignItems="center" gap={2} mb={2}>
                 <TextField
                     label="Buscar por legajo"
                     variant="outlined"
                     value={inputLegajo}
                     onChange={handleLegajoChange}
                     onKeyDown={handleKeyDown}
-                    style={{ width: "200px" }}
+                    sx={{ width: 200 }}
                 />
                 {usuarioSeleccionado && (
-                    <Box
-                        bgcolor="#f0f0f0"
-                        p={1}
-                        borderRadius="borderRadius"
-                    >
-                        <Typography variant="body1">
+                    <Box bgcolor="#f0f0f0" p={1} borderRadius={1}>
+                        <Typography>
                             {usuarioSeleccionado.nombre} {usuarioSeleccionado.apellido}
                         </Typography>
                     </Box>
                 )}
             </Box>
-            <Button variant="outlined" onClick={() => setIsDialogOpen(true)}>Buscar Empleado</Button>
+            <Button variant="outlined" onClick={() => setIsDialogOpen(true)}>
+                Buscar Empleado
+            </Button>
+
             <Dialog open={isDialogOpen} onClose={() => setIsDialogOpen(false)} fullWidth>
                 <DialogTitle>Buscar Empleado</DialogTitle>
                 <DialogContent>
                     <TextField
                         autoFocus
                         margin="dense"
-                        label="Buscar por Nombre, Apellido o Legajo"
-                        type="text"
+                        label="Nombre, Apellido o Legajo"
                         fullWidth
                         variant="outlined"
                         value={searchInput}
                         onChange={handleSearchChange}
                     />
                     <List>
-                        {filteredUsuarios.map((usuario) => (
-                            <ListItem button key={usuario.legajo} onClick={() => handleSelectUsuario(usuario)}>
-                                <ListItemText primary={`${usuario.nombre} ${usuario.apellido} - ${usuario.legajo}`} />
+                        {filteredUsuarios.map(u => (
+                            <ListItem button key={u.legajo} onClick={() => handleSelectUsuario(u)}>
+                                <ListItemText primary={`${u.nombre} ${u.apellido} - ${u.legajo}`} />
                             </ListItem>
                         ))}
                     </List>
@@ -183,33 +240,41 @@ const FormularioSalida = ({ supervisor }) => {
                     <Button onClick={() => setIsDialogOpen(false)}>Cancelar</Button>
                 </DialogActions>
             </Dialog>
+
+            {/* Selector de motivo */}
             <FormControl fullWidth margin="normal">
-                <InputLabel>Motivo</InputLabel>
+                <InputLabel>
+                    {mode === "salida" ? "Motivo de Salida" : "Motivo de Ingreso"}
+                </InputLabel>
                 <Select
-                    value={salidaSeleccionada.motivo}
-                    label="Motivo"
                     name="motivo"
+                    value={salidaSeleccionada.motivo}
+                    label={mode === "salida" ? "Motivo de Salida" : "Motivo de Ingreso"}
                     onChange={handleChange}
                 >
-                    {motivos
-                        .filter((motivo) => motivo.id !== 7 && motivo.id !== 2)
-                        .map((motivo) => (
-                            <MenuItem key={motivo.id} value={motivo.id}>
-                                {motivo.motivo_salida}
-                            </MenuItem>
-                        ))}
+                    {(mode === "salida" ? motivosSalida : motivosIngreso).map(m => (
+                        <MenuItem key={m.id} value={m.id}>
+                            {mode === "salida" ? m.motivo_salida : m.motivo_ingreso}
+                        </MenuItem>
+                    ))}
                 </Select>
             </FormControl>
 
-            <FormControlLabel
-                control={<Checkbox checked={sinRetorno} onChange={handleSinRetornoChange} />}
-                label="Sin retorno"
-            />
-            <Button type="submit" variant="contained" color="primary">
-                Crear Salida
-            </Button>
+            {/* Checkbox sólo en Salida */}
+            {mode === "salida" && (
+                <FormControlLabel
+                    control={<Checkbox checked={sinRetorno} onChange={handleSinRetornoChange} />}
+                    label="Sin retorno"
+                />
+            )}
+
+            <Box mt={2}>
+                <Button type="submit" variant="contained" color="primary">
+                    {mode === "salida" ? "Crear Salida" : "Crear Autorización"}
+                </Button>
+            </Box>
         </form>
     );
 };
 
-export default FormularioSalida;
+export default RegistrarSalida;

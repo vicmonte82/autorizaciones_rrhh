@@ -930,109 +930,126 @@ app.post("/autorizaciones", async (req, res) => {
 
     // 1) Validar empleado
     try {
-        const emp = await pool.query(
+        const uEmp = await pool.query(
             "SELECT estado FROM usuarios WHERE legajo = $1",
             [legajo_empleado]
         );
-        if (!emp.rows.length) {
+        if (!uEmp.rows.length) {
             return res.status(404).json({ error: "Colaborador no encontrado" });
         }
-        const estEmp = emp.rows[0].estado.trim().toUpperCase();
+        const estEmp = uEmp.rows[0].estado.trim().toUpperCase();
         if (estEmp === "INAC") {
             return res
                 .status(400)
                 .json({ error: "El colaborador no pertenece a planta" });
         }
-    } catch (err) {
-        console.error("Error validando empleado:", err);
-        return res.status(500).json({ error: err.message });
+    } catch (valErr) {
+        console.error("Error validando empleado:", valErr);
+        return res.status(500).json({ error: valErr.message });
     }
 
     // 2) Validar supervisor
     try {
-        const sup = await pool.query(
-            "SELECT estado FROM usuarios_login WHERE legajo = $1",
+        const uSup = await pool.query(
+            "SELECT estado FROM usuarios WHERE legajo = $1",
             [creador]
         );
-        if (!sup.rows.length) {
+        if (!uSup.rows.length) {
             return res.status(400).json({ error: "Supervisor no encontrado" });
         }
-        const estSup = sup.rows[0].estado.trim().toUpperCase();
+        const estSup = uSup.rows[0].estado.trim().toUpperCase();
         if (estSup === "INAC") {
             return res
                 .status(400)
-                .json({ error: "El supervisor no pertenece a planta" });
+                .json({ error: "El supervisor está deshabilitado" });
         }
-    } catch (err) {
-        console.error("Error validando supervisor:", err);
-        return res.status(500).json({ error: err.message });
+    } catch (valErr) {
+        console.error("Error validando supervisor:", valErr);
+        return res.status(500).json({ error: valErr.message });
     }
 
-    // 3) Bloquear auto‑autorización: colaborador y supervisor no pueden ser el mismo
+    // 3) Bloquear auto‑autorización
     if (legajo_empleado.trim() === creador.trim()) {
         return res
             .status(400)
             .json({ error: "El supervisor no puede autorizarse a sí mismo" });
     }
 
-    // 4) Verificar que no haya ya una autorización PENDIENTE para este colaborador
+    // 4) Validar motivo en la tabla de ingresos
     try {
-        // Query más robusta: trim + uppercase
-        const pend = await pool.query(
-            `SELECT *
-            FROM autorizaciones
-            WHERE legajo_empleado = $1
-            AND UPPER(TRIM(estado)) = 'PENDIENTE'`,
-            [legajo_empleado]
+        const mv = await pool.query(
+            "SELECT 1 FROM motivos_ingreso WHERE id = $1",
+            [motivo]
         );
-        console.log("Pendientes encontradas:", pend.rows); // <-- para debugging
-
-        if (pend.rows.length > 0) {
+        if (!mv.rows.length) {
             return res
                 .status(400)
-                .json({ error: "El colaborador tiene una autorización pendiente" });
+                .json({ error: "Motivo de ingreso no válido" });
         }
     } catch (err) {
-        console.error("Error validando autorizaciones pendientes:", err);
-        return res.status(500).json({ error: err.message });
+        console.error("Error validando motivo:", err);
+        return res.status(500).json({ error: "Error interno al validar motivo" });
     }
 
-    // 5) Insertar nueva autorización
+    // 5) Insertar y, si funciona, devolver el objeto detallado
     try {
-        const { rows } = await pool.query(
+        const insert = await pool.query(
             `INSERT INTO autorizaciones
-            (legajo_empleado, legajo_supervisor, tipo, motivo)
-        VALUES ($1, $2, $3, $4)
-        ON CONFLICT (legajo_empleado)
-            WHERE ((estado)::text = 'PENDIENTE'::text)
-             DO NOTHING
-        RETURNING *;`,
+         (legajo_empleado, legajo_supervisor, tipo, motivo)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (legajo_empleado)
+         WHERE estado = 'PENDIENTE'
+         DO NOTHING
+       RETURNING id;`,
             [legajo_empleado, creador, tipo, motivo]
         );
 
-        if (rows.length === 0) {
-            // Ya existía una PENDIENTE, no se insertó nada
+        if (!insert.rows.length) {
             return res
                 .status(400)
                 .json({ error: "El colaborador tiene una autorización pendiente" });
         }
 
-        // Se insertó OK
-        const nueva = rows[0];
-        io.emit("nuevaAutorizacion", nueva);
-        return res.status(201).json(nueva);
+        const nuevaId = insert.rows[0].id;
+
+        // 6) Traer la fila completa con joins
+        const detailQuery = `
+      SELECT
+        a.id,
+        a.legajo_empleado,
+        TRIM(uE.nombre) || ' ' || TRIM(uE.apellido)     AS empleado_nombre,
+        a.legajo_supervisor,
+        TRIM(uS.nombre) || ' ' || TRIM(uS.apellido)     AS supervisor_nombre,
+        a.tipo,
+        mi.motivo_salida                               AS motivo_desc,
+        a.estado,
+        a.solicitado_en,
+        a.respondido_por,
+        a.respondido_en
+      FROM autorizaciones a
+        JOIN usuarios uE       ON a.legajo_empleado   = uE.legajo
+        JOIN usuarios uS       ON a.legajo_supervisor = uS.legajo
+        JOIN motivos_ingreso mi ON a.motivo           = mi.id
+      WHERE a.id = $1;
+    `;
+
+        const detailRes = await pool.query(detailQuery, [nuevaId]);
+        const nuevaDetallada = detailRes.rows[0];
+
+        // 7) Emitir y responder con el objeto completo
+        io.emit("nuevaAutorizacion", nuevaDetallada);
+        return res.status(201).json(nuevaDetallada);
 
     } catch (err) {
-        console.error("Error inesperado al crear autorización:", err);
+        console.error("Error creando autorización:", err);
         return res
             .status(500)
             .json({ error: "Ocurrió un error inesperado al crear la autorización" });
     }
-
 });
 
 app.get("/autorizaciones", async (req, res) => {
-    const { tipo, estado } = req.query;
+    const { tipo, estado, legajo_supervisor } = req.query;
     const condiciones = [];
     const params = [];
     let idx = 1;
@@ -1045,6 +1062,10 @@ app.get("/autorizaciones", async (req, res) => {
         condiciones.push(`a.estado = $${idx++}`);
         params.push(estado);
     }
+    if (legajo_supervisor) {
+        condiciones.push(`a.legajo_supervisor = $${idx++}`);
+        params.push(legajo_supervisor);
+    }
 
     const whereClause = condiciones.length
         ? "WHERE " + condiciones.join(" AND ")
@@ -1053,20 +1074,20 @@ app.get("/autorizaciones", async (req, res) => {
     const query = `
     SELECT
       a.*,
-      TRIM(uE.nombre) || ' ' || TRIM(uE.apellido) AS empleado_nombre,
-      TRIM(uS.nombre) || ' ' || TRIM(uS.apellido) AS supervisor_nombre,
-      -- si es SALIDA tomamos de motivos_salida, si es INGRESO de motivos_ingreso
+      TRIM(uE.nombre) || ' ' || TRIM(uE.apellido)     AS empleado_nombre,
+      TRIM(uS.nombre) || ' ' || TRIM(uS.apellido)     AS supervisor_nombre,
       CASE
         WHEN a.tipo = 'SALIDA' THEN ms.motivo_salida
         ELSE mi.motivo_salida
-      END AS motivo_desc
+      END                                              AS motivo_desc
     FROM autorizaciones a
-      JOIN usuarios       uE ON a.legajo_empleado   = uE.legajo
-      JOIN usuarios       uS ON a.legajo_supervisor = uS.legajo
-      LEFT JOIN motivos_salida  ms ON a.tipo = 'SALIDA' AND a.motivo = ms.id
+      JOIN usuarios          uE ON a.legajo_empleado   = uE.legajo
+      JOIN usuarios          uS ON a.legajo_supervisor = uS.legajo
+      LEFT JOIN motivos_salida  ms ON a.tipo = 'SALIDA'  AND a.motivo = ms.id
       LEFT JOIN motivos_ingreso mi ON a.tipo = 'INGRESO' AND a.motivo = mi.id
     ${whereClause}
-    ORDER BY a.solicitado_en DESC`;
+    ORDER BY a.solicitado_en DESC
+  `;
 
     try {
         const { rows } = await pool.query(query, params);
@@ -1077,34 +1098,156 @@ app.get("/autorizaciones", async (req, res) => {
     }
 });
 
+app.get("/autorizaciones/motivos", async (req, res) => {
+    try {
+        const query = `
+      SELECT
+        id,
+        motivo_salida AS motivo_ingreso
+      FROM motivos_ingreso
+    `;
+        const result = await pool.query(query);
+        res.json(result.rows);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get("/autorizaciones/:id", async (req, res) => {
+    const { id } = req.params;
+    const query = `
+    SELECT
+      a.*,
+      TRIM(uE.nombre) || ' ' || TRIM(uE.apellido) AS empleado_nombre,
+      TRIM(uS.nombre) || ' ' || TRIM(uS.apellido) AS supervisor_nombre,
+      CASE
+        WHEN a.tipo = 'SALIDA' THEN ms.motivo_salida
+        ELSE mi.motivo_salida
+      END AS motivo_desc
+    FROM autorizaciones a
+      JOIN usuarios uE ON a.legajo_empleado   = uE.legajo
+      JOIN usuarios uS ON a.legajo_supervisor = uS.legajo
+      LEFT JOIN motivos_salida  ms ON a.tipo = 'SALIDA'  AND a.motivo = ms.id
+      LEFT JOIN motivos_ingreso mi ON a.tipo = 'INGRESO' AND a.motivo = mi.id
+    WHERE a.id = $1
+  `;
+    try {
+        const { rows } = await pool.query(query, [id]);
+        if (!rows.length) return res.status(404).json({ error: "No existe autorización" });
+        res.json(rows[0]);
+    } catch (err) {
+        console.error("Error obteniendo autorización:", err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
 app.put("/autorizaciones/:id", async (req, res) => {
     const { id } = req.params;
     const { estado, respondido_por } = req.body;
     const respondido_en = new Date();
 
+    // 1) Validar rol de vigilancia
     try {
-        const { rows } = await pool.query(
-            `UPDATE autorizaciones
-         SET estado        = $1,
-             respondido_por = $2,
-             respondido_en  = $3
-       WHERE id = $4
-       RETURNING *`,
+        const chk = await pool.query(
+            "SELECT rol FROM usuarios_login WHERE legajo = $1",
+            [respondido_por]
+        );
+        if (!chk.rows.length) {
+            return res.status(404).json({ error: "Usuario respondedor no encontrado" });
+        }
+        if (chk.rows[0].rol.trim().toLowerCase() !== "vigilancia") {
+            return res
+                .status(403)
+                .json({ error: "Usuario no autorizado para realizar esta acción" });
+        }
+    } catch (err) {
+        console.error("Error validando permisos de usuario:", err);
+        return res.status(500).json({ error: "Error interno al validar permisos" });
+    }
+
+    // 1.1) Validar existencia en usuarios_login
+    try {
+        const existe = await pool.query(
+            "SELECT 1 FROM usuarios_login WHERE legajo = $1",
+            [respondido_por]
+        );
+        if (!existe.rows.length) {
+            return res
+                .status(400)
+                .json({ error: "El usuario respondedor no existe en usuarios_login" });
+        }
+    } catch (err) {
+        console.error("Error validando usuario en usuarios_login:", err);
+        return res.status(500).json({ error: "Error interno al validar usuario" });
+    }
+
+    // 2) Actualizar autorización
+    let updatedId;
+    try {
+        const upd = await pool.query(
+            `
+      UPDATE autorizaciones
+        SET estado        = $1,
+            respondido_por = $2::varchar,
+            respondido_en  = $3
+      WHERE id = $4
+      RETURNING id;
+      `,
             [estado, respondido_por, respondido_en, id]
         );
-        if (rows.length === 0) {
+
+        if (!upd.rows.length) {
             return res.status(404).json({ error: "Autorización no encontrada" });
         }
-        const actualizada = rows[0];
-        io.emit("autorizacionActualizada", actualizada);
-        res.json(actualizada);
+        updatedId = upd.rows[0].id;
     } catch (err) {
+        // Capturar FK violation
+        if (err.code === '23503' && err.constraint === 'autorizaciones_respondido_por_fkey') {
+            return res
+                .status(400)
+                .json({ error: "El usuario respondedor no existe o no está activo" });
+        }
         console.error("Error actualizando autorización:", err);
-        res.status(500).json({ error: err.message });
+        return res
+            .status(500)
+            .json({ error: "Ocurrió un error interno al actualizar la autorización" });
+    }
+
+    // 3) Leer detalle completo tras el UPDATE
+    try {
+        const detailQ = `
+      SELECT
+        a.id,
+        a.legajo_empleado,
+        TRIM(uE.nombre) || ' ' || TRIM(uE.apellido) AS empleado_nombre,
+        a.legajo_supervisor,
+        TRIM(uS.nombre) || ' ' || TRIM(uS.apellido) AS supervisor_nombre,
+        a.tipo,
+        mi.motivo_salida                            AS motivo_desc,
+        a.estado,
+        a.solicitado_en,
+        a.respondido_por,
+        a.respondido_en
+      FROM autorizaciones a
+        JOIN usuarios uE       ON a.legajo_empleado   = uE.legajo
+        JOIN usuarios uS       ON a.legajo_supervisor = uS.legajo
+        JOIN motivos_ingreso mi ON a.motivo           = mi.id
+      WHERE a.id = $1;
+    `;
+        const detailRes = await pool.query(detailQ, [updatedId]);
+        const autorizacionDet = detailRes.rows[0];
+
+        // 4) Emitir y responder
+        io.emit("autorizacionActualizada", autorizacionDet);
+        return res.json(autorizacionDet);
+
+    } catch (err) {
+        console.error("Error obteniendo detalle de autorización:", err);
+        return res
+            .status(500)
+            .json({ error: "Error interno al leer la autorización actualizada" });
     }
 });
-
-
 
 const port = process.env.PORT || 4060;
 
@@ -1121,4 +1264,3 @@ cron.schedule('0 0 * * *', async () => {
         console.error('Error al ejecutar cron job:', error);
     }
 });
-
